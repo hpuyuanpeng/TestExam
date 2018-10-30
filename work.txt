@@ -1,0 +1,411 @@
+1.sqoop导入hdfs中
+测试是否可连接mysql：
+sqoop list-databases --connect jdbc:mysql://10.0.155.227:3306 --username root --password root
+将数据导入hdfs中
+ 单条导入：
+ sqoop import --connect jdbc:mysql://10.0.155.227:3306/qianfeng --username root --password root --table answer_paper --append  --fields-terminated-by '\t'  -m 1
+ 
+ 导入所有的数据:
+ sqoop import-all-tables --connect jdbc:mysql://10.0.155.227:3306/qianfeng --username root --password root --fields-terminated-by '\t'   -m 1
+ 
+ sqoop-import-all-tables --connect jdbc:mysql://10.0.155.227:3306/qianfeng --username root --password root --as-textfile --warehouse-dir /user/root  --fields-terminated-by '\t' -m 1
+ 默认文件夹是/user/root/
+ 
+2.json的格式
+  
+{"842":{"useranswer":"3407|3408|3410","score":0},"846":{"useranswer":"3411","score":2},"847":{"useranswer":"3499","score":2},"848":{"useranswer":"3419","score":2},"849":{"useranswer":"3423","score":2},"850":{"useranswer":"3505","score":2},"851":{"useranswer":"3433","score":2},"854":{"useranswer":"3443","score":2},"855":{"useranswer":"3448","score":2},"856":{"useranswer":"3453|3454","score":0},"857":{"useranswer":"3455|3456|3457","score":2},"858":{"useranswer":"3459|3460|3461|3462","score":2},"859":{"useranswer":"3463|3464","score":0},"861":{"useranswer":"3471","score":0},"862":{"useranswer":"3477","score":2},"866":{"useranswer":"gulp.task()","score":0},"867":{"useranswer":"gulp.src()","score":0},"872":{"useranswer":"push -v origin master","score":0},"873":{"useranswer":"pull  origin master","score":0},"875":{"useranswer":"# mkdir [file name]","score":0}}
+
+mapreduce解析
+
+3.转化为hive格式
+create database MaProgram;
+
+create table if not exists answer_paper(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id  int,
+examinee_name String,
+titleID int,
+score int
+)
+row format delimited  
+fields terminated by '\t';
+
+
+collection items terminated by ','
+map keys terminated by ':';
+
+导入数据
+load data inpath '/MaProgram/TitleID/part-r-00000' into table answer_paper;
+
+4.解析category 去除json 只获取id和name
+5.创建category的表
+create table if not exists category(
+id int,
+name String
+)
+row format delimited 
+fields terminated by '\t';
+
+导入数据：
+load data inpath '/CateGoryDropJson/part-r-00000' into table category;
+
+6.question表分解获取id和categoryID
+在使用mapreduce的时候由于map就可以执行完毕，但是用到reduce后就会一直报错。
+
+7.创建question表
+create table if not exists question(
+id int,
+category_id int,
+question_difficulty_id int,
+question_type_id int
+)
+row format delimited
+fields terminated by '\t';
+
+导入数据
+load data inpath '/MaProgram/QuestionIDAndCategoryID/part-r-00000' into table question;
+
+7.answer_paper与question关联，通过题目id
+
+create table guanlian as
+select b.*,a.category_id,a.question_difficulty_id,a.question_type_id from question a
+join
+answer_paper b
+on b.titleID=a.id;
+
+8.然后再令guanlian和我们的category进行关联
+create table GetStage as 
+select a.*,b.name from guanlian a
+join category b
+on b.id = a.category_id;
+
+
+9.难度
+
+10.主客观
+create table if not exists question_type(
+id int,
+type int,
+name String,
+is_objective int
+)
+row format delimited
+fields terminated by '\t';   
+
+导入数据：
+load data inpath '/user/root/question_type/part-m-00000' into table question_type;
+
+create table objective as 
+select b.*,a.is_objective from question_type a
+join GetStage b
+on b.question_type_id = a.id;
+
+11.题目分
+	exam重建，只需要id和paper_template_id
+create table if not exists exam(
+id int,
+paper_template_id int
+) 
+row format delimited
+fields terminated by '\t';
+
+load data inpath '/MaProgram/exam/part-r-00000' into table exam;
+	进行join
+
+create table objectiveAndExam as 
+select b.*,a.paper_template_id from exam a
+join objective b
+on b.exam_id = a.id;
+
+
+
+重写paper_template_part表
+create table if not exists paper_template_part(
+paper_template_id int,
+per_question_mark int
+) 
+row format delimited
+fields terminated by '\t';
+
+load data inpath '/MaProgram/paper_template_part/part-r-00000' into table paper_template_part;
+
+根据paper_template_id让objectiveAndExam和paper_template_part进行join
+
+create table TrueScore as 
+select b.*,a.per_question_mark from paper_template_part a
+join objectiveAndExam b
+on b.paper_template_id = a.paper_template_id;
+
+
+12求是否正确
+放入mapreduce中计算
+现在每个字段是：
+考试ID	考试时间	班级	学号	姓名	题目ID  得分  category_id	题目难度  试题类型 		题目所属阶段 		题目客/主观	 试卷模板id	 题目分
+
+13生成最终表
+create table if not exists finally1(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id  int,
+examinee_name String,
+titleID int,
+stage  String,
+question_difficulty_id int, 
+is_objective int,
+per_question_mark int,
+score int,
+if_true int
+)
+row format delimited
+fields terminated by '\t';	
+
+load data inpath '/MaProgram/finally/part-r-00000' into table finally1;	
+
+
+
+<---------!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+第二张表：
+考试ID
+考试时间
+班级
+学号
+姓名
+交卷时间
+答题耗时
+主观成绩
+客观成绩
+总成绩	
+create table if not exists finally2(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id int,
+examinee_name String,
+submit_time String,
+exam_time String,
+subject_mark int,
+objective_mark int,
+total_score String
+)
+row format delimited
+fields terminated by '\t';
+
+load data inpath '/MaProgram/finally2/part-r-00000' into table finally2;
+
+
+
+<----------------------------------!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+第三个表：
+考试ID
+考试时间
+班级
+学号
+姓名
+题目ID 
+哪一题
+题目客/主观
+题目分
+得分
+正确与否
+partition by  所属阶段/难度
+
+新建+题号
+
+create table if not exists finally3(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id  int,
+examinee_name String,
+titleID int, 
+is_objective int,
+per_question_mark int,
+score int,
+if_true int
+)
+partitioned by(stage STRING, question_difficulty_id int)
+row format delimited
+fields terminated by '\t';	
+
+create table Finally3objective as 
+select b.*,a.type from question_type a
+join TrueScore b
+on b.question_type_id = a.id;
+然后进行去重操作
+mapreduce解析
+/MaProgram/finally3/part-r-00000
+创建临时表
+
+create table if not exists finally33(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id int,
+examinee_name String,
+titleID int,
+whichtypeID String,
+is_objective int,
+stage  String,
+question_difficulty_id int,
+per_question_mark int,
+score int,
+if_true int
+)
+row format delimited
+fields terminated by '\t';
+
+load data inpath '/MaProgram/finally3/part-r-00000' into table finally33;
+开启动态分区
+
+
+set hive.exec.dynamici.partition=true;
+set hive.exec.dynamic.partition.mode=nonstrict;
+insert overwrite table finally3 partition(stage,question_difficulty_id) 
+select a.exam_id,a.start_date,a.class_name,a.examinee_id,a.examinee_name,a.titleID,a.is_objective,a.per_question_mark,a.score,a.if_true,a.stage,a.question_difficulty_id from finally33 a 
+where a.whichtypeID=1;
+
+<---------------------------!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+第四张表
+考试ID
+考试时间
+班级
+学号
+姓名
+阶段
+错题数
+总题数
+stage  String,
+question_difficulty_id int,
+per_question_mark int,
+score int,
+if_true int
+
+create table finally4(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id int,
+examinee_name String,
+stage  String,
+sum int,
+sums int
+)
+row format delimited
+fields terminated by '\t';
+
+
+
+insert into table finally4 
+select s.exam_id,s.start_date,s.class_name,s.examinee_id, s.examinee_name, s.stage,a.sum,b.sums from finally33 s
+join
+(select examinee_name,count(*)as sum from 
+finally33 
+where if_true=0
+group by examinee_name)a
+on s.examinee_name=a.examinee_name 
+join
+(select examinee_name,count(*)as sums from 
+finally33 
+group by examinee_name)b
+on a.examinee_name=b.examinee_name
+group by s.exam_id,s.start_date,s.class_name,s.examinee_id, s.examinee_name, s.stage,a.sum,b.sums
+;
+<--------!!!!!!!!!!!!!!!!!!!!!!!!!
+第五章表
+create table finally5(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id int,
+examinee_name String,
+stage  String,
+question_difficulty_id int,
+sum int,
+sums int
+)
+row format delimited
+fields terminated by '\t';
+
+insert into table finally5
+select s.exam_id,s.start_date,s.class_name,s.examinee_id, s.examinee_name, s.stage,s.question_difficulty_id,a.sum,b.sums from finally33 s
+join
+(select examinee_name,count(*)as sum from 
+finally33 
+where if_true=0
+group by examinee_name)a
+on s.examinee_name=a.examinee_name 
+join
+(select examinee_name,count(*)as sums from 
+finally33 
+group by examinee_name)b
+on a.examinee_name=b.examinee_name
+group by s.exam_id,s.start_date,s.class_name,s.examinee_id, s.examinee_name, s.stage,s.question_difficulty_id,a.sum,b.sums
+;
+
+<-------------------------!!!!!!!!!!!!!!!!!!!!!!!!!
+第六张表
+考试ID
+考试时间
+班级
+学号
+姓名
+阶段
+难易程度
+正确率
+根据第五张表计算
+mapreduce解析
+create table finally6(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id int,
+examinee_name String,
+stage  String,
+question_difficulty_id int,
+accuracy DOUBLE
+)
+row format delimited
+fields terminated by '\t';
+
+导入数据：
+load data inpath '/MaProgram/finally6/part-r-00000' into table finally6;
+
+
+<---------------------------!!!!!!!!!!!!!!!!!!!!!!!!
+第七章表
+根据第四章表做
+mapreduce解析
+create table finally7(
+exam_id int,
+start_date String,
+class_name String,
+examinee_id int,
+examinee_name String,
+stage  String,
+accuracy DOUBLE
+)
+row format delimited
+fields terminated by '\t';
+导入数据：
+load data inpath '/MaProgram/finally7/part-r-00000' into table finally7;
+
+<---------------------!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+第八章表
+
+
+
+
+
+
+
+
+
+
+
+
+ 
